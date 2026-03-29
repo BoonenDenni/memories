@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'browse_books_screen.dart';
+import 'my_library_screen.dart';
 
 /// Placeholder actions — wire navigation per feature later.
 class HomeScreen extends StatelessWidget {
@@ -80,6 +81,14 @@ class HomeScreen extends StatelessWidget {
                           Navigator.of(context).push(
                             MaterialPageRoute<void>(
                               builder: (_) => const BrowseBooksScreen(),
+                            ),
+                          );
+                          return;
+                        }
+                        if (index == 1) {
+                          Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const MyLibraryScreen(),
                             ),
                           );
                           return;

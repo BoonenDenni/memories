@@ -1,0 +1,63 @@
+# Builds memories_app for web and publishes to GitHub Pages.
+#
+# Ongoing deploys: push to `main` (or use Actions → Run workflow).
+# One-time: repo Settings → Secrets (SUPABASE_*), Pages → Source: GitHub Actions.
+#
+# If the site is a user/org root site (<user>.github.io with files at domain root),
+# change --base-href below to `/` and set that in the `flutter build web` step.
+
+name: Deploy web to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        working-directory: memories_app
+        run: flutter pub get
+
+      - name: Build web
+        working-directory: memories_app
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          flutter build web --release \
+            --base-href=/${{ github.event.repository.name }}/ \
+            --dart-define=SUPABASE_URL="$SUPABASE_URL" \
+            --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: memories_app/build/web
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

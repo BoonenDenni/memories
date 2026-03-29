@@ -2,9 +2,9 @@ import 'dart:math' show min;
 
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:url_launcher/url_launcher.dart';
-
 import '../models/book_with_categories.dart';
+import 'book_detail_screen.dart';
+import '../utils/open_download_url.dart';
 
 class _CategoryRow {
   const _CategoryRow({required this.id, required this.name});
@@ -28,8 +28,12 @@ class BrowseBooksScreen extends StatefulWidget {
 class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
   late final Future<List<_CategoryRow>> _categoriesFuture;
   final TextEditingController _searchController = TextEditingController();
+  final TextEditingController _authorController = TextEditingController();
 
   final Set<String> _selectedCategoryIds = {};
+
+  /// 0 = no minimum; 1–5 = require `book_rating >= this` (non-null).
+  int _minBookRating = 0;
 
   /// `null` until the user taps "Show books".
   Future<_BookBrowseResult>? _booksFuture;
@@ -45,6 +49,7 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
   @override
   void dispose() {
     _searchController.dispose();
+    _authorController.dispose();
     super.dispose();
   }
 
@@ -63,20 +68,13 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
   }
 
   Future<void> _onShowBooks() async {
-    if (_selectedCategoryIds.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Select at least one category to load books.'),
-        ),
-      );
-      return;
-    }
-
     setState(() {
       _booksLoading = true;
       _booksFuture = _fetchBooksForFilter(
         Set<String>.from(_selectedCategoryIds),
         _searchController.text,
+        _authorController.text,
+        _minBookRating,
       );
     });
 
@@ -94,61 +92,105 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
   Future<_BookBrowseResult> _fetchBooksForFilter(
     Set<String> selectedCategoryIds,
     String searchQuery,
+    String authorQuery,
+    int minBookRating,
   ) async {
     final client = Supabase.instance.client;
+    List<Map<String, dynamic>> bookRows;
+    Set<String> bookIdSet;
 
-    final linksFiltered =
-        await _linksForCategoryIds(client, selectedCategoryIds);
-    final bookIdSet = linksFiltered
-        .map((e) => _asString(e['book_id']))
-        .where((id) => id.isNotEmpty)
-        .toSet();
+    if (selectedCategoryIds.isEmpty) {
+      bookRows = await _fetchAllBookRows(client);
+      bookIdSet =
+          bookRows.map((r) => _asString(r['id'])).where((id) => id.isNotEmpty).toSet();
+    } else {
+      final linksFiltered =
+          await _linksForCategoryIds(client, selectedCategoryIds);
+      bookIdSet = linksFiltered
+          .map((e) => _asString(e['book_id']))
+          .where((id) => id.isNotEmpty)
+          .toSet();
 
-    if (bookIdSet.isEmpty) {
-      return const _BookBrowseResult(
-        books: [],
-        emptyMessage:
-            'No book_categories rows were returned for the categories you '
-            'picked. If Table Editor shows links but this screen does not, Row '
-            'Level Security often hides them from the app: add SELECT on '
-            'public.book_categories for role authenticated (see repo migration '
-            '20250329120001). Also confirm category_id in book_categories matches '
-            'the category id you selected (not an old duplicate category row).',
-      );
+      if (bookIdSet.isEmpty) {
+        return const _BookBrowseResult(
+          books: [],
+          emptyMessage:
+              'No book_categories rows were returned for the categories you '
+              'picked. If Table Editor shows links but this screen does not, '
+              'Row Level Security often hides them from the app: add SELECT on '
+              'public.book_categories for role authenticated. Also confirm '
+              'category_id in book_categories matches the category id you '
+              'selected (not an old duplicate category row).',
+        );
+      }
+
+      bookRows = await _fetchBookRowsById(client, bookIdSet);
     }
-
-    var bookRows = await _fetchBookRowsById(client, bookIdSet);
 
     if (bookRows.isEmpty) {
       return const _BookBrowseResult(
         books: [],
         emptyMessage:
-            'book_categories points to books, but the books table returned no '
-            'rows. Check Row Level Security on public.books (you need SELECT '
-            'for authenticated users), and that those book ids still exist.',
+            'No books were returned. The catalog may be empty, or Row Level '
+            'Security on public.books may be blocking SELECT for authenticated '
+            'users.',
       );
     }
 
     final q = searchQuery.trim().toLowerCase();
     if (q.isNotEmpty) {
-      final beforeSearch = bookRows.length;
+      final before = bookRows.length;
       bookRows = bookRows.where((row) {
         final title = (row['title']?.toString() ?? '').toLowerCase();
-        final author = (row['author']?.toString() ?? '').toLowerCase();
         final series = (row['serie_name']?.toString() ?? '').toLowerCase();
-        return title.contains(q) ||
-            author.contains(q) ||
-            series.contains(q);
+        return title.contains(q) || series.contains(q);
       }).toList();
-      if (bookRows.isEmpty && beforeSearch > 0) {
+      if (bookRows.isEmpty && before > 0) {
         return const _BookBrowseResult(
           books: [],
           emptyMessage:
-              'No books match your search text in title, author, or series. '
-              'Clear the search field and tap Show books again.',
+              'No books match your title/series search. Clear that field or try other words.',
         );
       }
     }
+
+    final authorQ = authorQuery.trim().toLowerCase();
+    if (authorQ.isNotEmpty) {
+      final before = bookRows.length;
+      bookRows = bookRows.where((row) {
+        final author = (row['author']?.toString() ?? '').toLowerCase();
+        return author.contains(authorQ);
+      }).toList();
+      if (bookRows.isEmpty && before > 0) {
+        return const _BookBrowseResult(
+          books: [],
+          emptyMessage:
+              'No books match the author filter. Clear it or change the text.',
+        );
+      }
+    }
+
+    if (minBookRating > 0) {
+      final before = bookRows.length;
+      bookRows = bookRows.where((row) {
+        final raw = row['book_rating'];
+        if (raw is! num) return false;
+        return raw.toDouble() >= minBookRating;
+      }).toList();
+      if (bookRows.isEmpty && before > 0) {
+        return _BookBrowseResult(
+          books: [],
+          emptyMessage:
+              'No books with rating at least $minBookRating. '
+              'Lower the minimum or include books without ratings (choose “Any”).',
+        );
+      }
+    }
+
+    bookIdSet = bookRows
+        .map((r) => _asString(r['id']))
+        .where((id) => id.isNotEmpty)
+        .toSet();
 
     final fullLinks = await _bookCategoryLinksForBooks(client, bookIdSet);
     final categoryIds = fullLinks
@@ -244,12 +286,35 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
       'id',
       bookIdSet.toList(),
     );
-    out.sort(
+    _sortBookRowsByTitle(out);
+    return out;
+  }
+
+  static Future<List<Map<String, dynamic>>> _fetchAllBookRows(
+    SupabaseClient client,
+  ) async {
+    final raw = await client
+        .from('books')
+        .select(
+          'id, title, author, description, download_url, book_rating, serie_name',
+        )
+        .order('title');
+    final out = _asMapList(raw);
+    _sortBookRowsByTitle(out);
+    return out;
+  }
+
+  static void _sortBookRowsByTitle(List<Map<String, dynamic>> rows) {
+    rows.sort(
       (a, b) => (a['title']?.toString() ?? '')
           .toLowerCase()
           .compareTo((b['title']?.toString() ?? '').toLowerCase()),
     );
-    return out;
+  }
+
+  static String _formatRating(double r) {
+    if (r == r.roundToDouble()) return r.toStringAsFixed(0);
+    return r.toStringAsFixed(1);
   }
 
   static Future<List<Map<String, dynamic>>> _bookCategoryLinksForBooks(
@@ -303,36 +368,9 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
 
   static String _asString(Object? value) => value?.toString() ?? '';
 
-  Future<void> _openDownload(BuildContext context, String? url) async {
-    if (url == null || url.trim().isEmpty) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No download link for this book.')),
-      );
-      return;
-    }
-    final uri = Uri.tryParse(url.trim());
-    if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Download link is not a valid http(s) URL.'),
-        ),
-      );
-      return;
-    }
-    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (!ok && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not open the link.')),
-      );
-    }
-  }
-
   String _ratingLabel(double? r) {
     if (r == null) return '—';
-    if (r == r.roundToDouble()) return r.toStringAsFixed(0);
-    return r.toStringAsFixed(1);
+    return _formatRating(r);
   }
 
   Widget _line(BuildContext context, String label, String value) {
@@ -379,16 +417,23 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
             ),
             const SizedBox(height: 4),
             Text(
-              'Pick categories, optionally narrow by text, then load books.',
+              'All filters are optional. Leave categories empty to load the full catalog.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
             ),
             const SizedBox(height: 12),
+            Text(
+              'Categories',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 6),
             if (categories.isEmpty)
               Text(
-                'No categories available yet. Add categories in Supabase first.',
-                style: Theme.of(context).textTheme.bodyMedium,
+                'No categories yet — you can still browse all books below.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
               )
             else
               Wrap(
@@ -415,17 +460,75 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
             TextField(
               controller: _searchController,
               decoration: const InputDecoration(
-                labelText: 'Search (title, author, series)',
-                hintText: 'Optional — apply after loading categories',
+                labelText: 'Title or series',
+                hintText: 'Optional — matches title and series name',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              textInputAction: TextInputAction.next,
+              onSubmitted: (_) => _onShowBooks(),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _authorController,
+              decoration: const InputDecoration(
+                labelText: 'Author',
+                hintText: 'Optional — author name contains this text',
                 border: OutlineInputBorder(),
                 isDense: true,
               ),
               textInputAction: TextInputAction.done,
               onSubmitted: (_) => _onShowBooks(),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
+            InputDecorator(
+              decoration: const InputDecoration(
+                labelText: 'Minimum rating (out of 5)',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<int>(
+                  isExpanded: true,
+                  value: _minBookRating,
+                  items: const [
+                    DropdownMenuItem(
+                      value: 0,
+                      child: Text('Any (include unrated)'),
+                    ),
+                    DropdownMenuItem(
+                      value: 1,
+                      child: Text('At least 1'),
+                    ),
+                    DropdownMenuItem(
+                      value: 2,
+                      child: Text('At least 2'),
+                    ),
+                    DropdownMenuItem(
+                      value: 3,
+                      child: Text('At least 3'),
+                    ),
+                    DropdownMenuItem(
+                      value: 4,
+                      child: Text('At least 4'),
+                    ),
+                    DropdownMenuItem(
+                      value: 5,
+                      child: Text('At least 5'),
+                    ),
+                  ],
+                  onChanged: _booksLoading
+                      ? null
+                      : (v) {
+                          if (v == null) return;
+                          setState(() => _minBookRating = v);
+                        },
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
             FilledButton.icon(
-              onPressed: (_booksLoading || categories.isEmpty) ? null : _onShowBooks,
+              onPressed: _booksLoading ? null : _onShowBooks,
               icon: _booksLoading
                   ? const SizedBox(
                       width: 18,
@@ -448,7 +551,7 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Text(
-            'Select categories and tap Show books. Nothing is loaded until then.',
+            'Tap Show books to load the catalog. All filters are optional.',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -514,54 +617,63 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
             final b = books[index];
             return Card(
               margin: const EdgeInsets.only(bottom: 12),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      b.title,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: () {
+                  Navigator.of(context).push<void>(
+                    MaterialPageRoute<void>(
+                      builder: (_) => BookDetailScreen(book: b),
                     ),
-                    const SizedBox(height: 8),
-                    _line(context, 'Author', b.author ?? '—'),
-                    _line(context, 'Series', b.serieName ?? '—'),
-                    _line(
-                      context,
-                      'Rating',
-                      _ratingLabel(b.bookRating),
-                    ),
-                    _line(
-                      context,
-                      'Categories',
-                      b.categoryNames.isEmpty
-                          ? '—'
-                          : b.categoryNames.join(', '),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Description',
-                      style: Theme.of(context).textTheme.labelLarge,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      (b.description?.trim().isNotEmpty ?? false)
-                          ? b.description!.trim()
-                          : '—',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                    const SizedBox(height: 12),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: FilledButton.icon(
-                        onPressed: () => _openDownload(context, b.downloadUrl),
-                        icon: const Icon(Icons.download_outlined, size: 20),
-                        label: const Text('Open download link'),
+                  );
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        b.title,
+                        style:
+                            Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 8),
+                      Text(
+                        'Tap for full description and library options',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                      ),
+                      const SizedBox(height: 8),
+                      _line(context, 'Author', b.author ?? '—'),
+                      _line(context, 'Series', b.serieName ?? '—'),
+                      _line(
+                        context,
+                        'Rating',
+                        _ratingLabel(b.bookRating),
+                      ),
+                      _line(
+                        context,
+                        'Categories',
+                        b.categoryNames.isEmpty
+                            ? '—'
+                            : b.categoryNames.join(', '),
+                      ),
+                      const SizedBox(height: 12),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: FilledButton.icon(
+                          onPressed: () =>
+                              openDownloadUrl(context, b.downloadUrl),
+                          icon: const Icon(Icons.download_outlined, size: 20),
+                          label: const Text('Open download link'),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             );
@@ -613,9 +725,17 @@ class _BrowseBooksScreenState extends State<BrowseBooksScreen> {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _buildFilterSection(categories),
+              Expanded(
+                flex: 42,
+                child: SingleChildScrollView(
+                  child: _buildFilterSection(categories),
+                ),
+              ),
               const Divider(height: 1),
-              Expanded(child: _buildResultsSection()),
+              Expanded(
+                flex: 58,
+                child: _buildResultsSection(),
+              ),
             ],
           );
         },

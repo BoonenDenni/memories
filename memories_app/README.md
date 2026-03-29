@@ -52,6 +52,16 @@ Configure **Site URL** and **Redirect URLs** in Supabase Auth if you use email c
 
 For **local web** (`flutter run -d web-server`), add your exact origin to **Redirect URLs**, e.g. `http://localhost:8090` and `http://localhost:8090/**` (use the port you run on). The app passes `emailRedirectTo` as `Uri.base.origin` on web so PKCE/email confirmation can return to the same dev server.
 
+## Deploy to GitHub Pages (repo root)
+
+The parent repo includes [`.github/workflows/deploy-web.yml`](../.github/workflows/deploy-web.yml): on every **push to `main`**, GitHub Actions builds web from this folder and publishes to Pages.
+
+**One-time:** Repository **Settings → Secrets and variables → Actions** — add `SUPABASE_URL` and `SUPABASE_ANON_KEY` (same values as in `dart_defines.json`). **Settings → Pages** — **Build and deployment** source: **GitHub Actions**. In Supabase Auth, add **Redirect URLs** for your live origin, e.g. `https://YOUR_USER.github.io/YOUR_REPO/` and `https://YOUR_USER.github.io/YOUR_REPO/**`.
+
+**Ongoing:** merge or push to `main`. To redeploy without a commit: **Actions** → **Deploy web to GitHub Pages** → **Run workflow**.
+
+If you rename the GitHub repository, the project Pages URL path changes — update Supabase redirects and the workflow’s `--base-href` (it uses the current repo name).
+
 ## Database
 
 SQL migrations for RLS, profiles, and triggers live in [`../supabase/migrations`](../supabase/migrations). Apply them with the Supabase CLI (`supabase db push`) or by running the files in order in the SQL Editor.
