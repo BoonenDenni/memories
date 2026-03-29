@@ -60,6 +60,8 @@ The parent repo includes [`.github/workflows/deploy-web.yml`](../.github/workflo
 
 **Ongoing:** merge or push to `main`. To redeploy without a commit: **Actions** → **Deploy web to GitHub Pages** → **Run workflow**.
 
+If a workflow run fails with a **deploy / Pages** error, confirm **Settings → Pages → Build and deployment** source is **GitHub Actions** (not “Deploy from a branch”). That must be set once per repo.
+
 If you rename the GitHub repository, the project Pages URL path changes — update Supabase redirects and the workflow’s `--base-href` (it uses the current repo name).
 
 ## Database
