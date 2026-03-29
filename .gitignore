@@ -1,0 +1,5 @@
+# Cursor / local IDE
+.cursor/
+
+# MCP tool caches (machine-specific)
+mcps/
